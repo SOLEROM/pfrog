@@ -192,107 +192,150 @@ EOF
 # ------------------------------------------------------------------
 # PULL COMMAND (with interactive listing)
 # ------------------------------------------------------------------
-pull_cmd() {
-    local nfs_flag="" config_file="pfrog.conf"
-    local yes="false" verbose="false"
-    local board part version nfs_root dir to_pull maxv f dest exp act ans
 
-    # parse pull options
-    while [[ $# -gt 0 && $1 == --* ]]; do
+pull_cmd() {
+    # option defaults
+    local nfs_flag="" config_file="pfrog.conf"
+    local yes="false" verbose="false" tag_mode="false"
+
+    # collect positional args here
+    local args=()
+    while [[ $# -gt 0 ]]; do
         case "$1" in
-            --nfs)     shift; nfs_flag=$1;;
-            --config)  shift; config_file=$1;;
-            --yes)     yes="true";;
-            --verbose) verbose="true";;
+            --nfs)     nfs_flag="$2"; shift 2;;
+            --config)  config_file="$2"; shift 2;;
+            --yes)     yes="true"; shift;;
+            --verbose) verbose="true"; shift;;
+            --tag)     tag_mode="true"; shift;;
             -h|--help)
                 cat <<'EOF'
 Usage: pfrog pull [options] [<board> [<part> [<version>]]]
-  No args          → list all boards
-  <board>          → list parts under that board
-  <board> <part>   → pull latest
-  <board> <part> <version> → pull specific version
+
+  No args                → list boards
+  <board>                → list parts under that board
+  <board> <part>         → pull latest (or use --tag for interactive)
+  <board> <part> <ver>   → pull specific version
 
 Options:
   --nfs <path>       Override NFS root.
   --config <file>    Alternate config file.
   --yes              Skip overwrite prompt.
   --verbose          Detailed logs.
+  --tag              Interactive version selection.
   -h, --help         Show this help.
 EOF
                 return
                 ;;
-            *) die "unknown option for pull: $1";;
+            *) 
+                args+=("$1")
+                shift
+                ;;
         esac
-        shift
     done
+    # restore positional args
+    set -- "${args[@]}"
 
     # resolve NFS root
-    nfs_root=$(resolve_nfs_root "$nfs_flag" "$config_file") || die "pull: NFS root could not be resolved"
+    local nfs_root
+    nfs_root=$(resolve_nfs_root "$nfs_flag" "$config_file") \
+        || die "pull: NFS root could not be resolved"
 
-    # 1) no args: list boards
+    # 1) no args → list boards
     if [[ $# -eq 0 ]]; then
         echo "You need to choose a board:"
-        for dir in "$nfs_root"/*/; do
-            [[ -d $dir ]] || continue
-            printf "  %s/\n" "$(basename "$dir")"
+        for d in "$nfs_root"/*/; do
+            [[ -d $d ]] || continue
+            printf "  %s/\n" "${d%/}" | xargs basename
         done
         return
     fi
 
-    # 2) one arg: list parts in that board
+    # 2) one arg → list parts
     if [[ $# -eq 1 ]]; then
-        board=$1
-        dir="$nfs_root/$board"
-        [[ -d $dir ]] || die "pull: board '$board' not found"
+        local board="$1"
+        local board_dir="$nfs_root/$board"
+        [[ -d $board_dir ]] || die "pull: board '$board' not found"
 
         echo "You need to choose a part under board '$board':"
-        for dir in "$nfs_root/$board"/*/; do
-            [[ -d $dir ]] || continue
-            printf "  %s/\n" "$(basename "$dir")"
+        for d in "$board_dir"/*/; do
+            [[ -d $d ]] || continue
+            printf "  %s/\n" "${d%/}" | xargs basename
         done
         return
     fi
 
-    # 3) two or three args: actually pull
-    board=$1; part=$2; version=${3:-}
-    dir="$nfs_root/$board/$part"
+    # 3) two or three args → perform pull
+    local board="$1" part="$2" version="${3:-}"
+    local dir="$nfs_root/$board/$part"
     [[ -d $dir ]] || die "pull: '$board/$part' not found"
 
-    to_pull=""; maxv=0
-    if [[ -n $version ]]; then
-        to_pull=$(ls "$dir"/*_"$version".tar.gz 2>/dev/null | head -n1)
-        [[ -n $to_pull ]] || die "pull: version $version not found"
-    else
-        for f in "$dir"/*.tar.gz; do
-            [[ -e $f ]] || continue
-            if [[ $(basename "$f") =~ ^[0-9a-f]{32}_([0-9]+)\.tar\.gz$ ]]; then
-                if (( BASH_REMATCH[1] > maxv )); then
-                    maxv=${BASH_REMATCH[1]}
-                    to_pull="$f"
-                fi
+    local to_pull=""
+    if [[ "$tag_mode" == "true" ]]; then
+        # interactive list + select
+        echo "Select an artifact to pull from '$board/$part':"
+        local files=( "$dir"/*.tar.gz )
+        [[ ${#files[@]} -gt 0 ]] || die "pull: no artifacts found"
+
+        local i=1
+        for f in "${files[@]}"; do
+            local name=$(basename "$f")
+            local ver=${name#*_}; ver=${ver%.tar.gz}
+            local meta="$dir/md5_${ver}.meta"
+            if [[ -f $meta ]]; then
+                local ts=$(grep '^timestamp=' "$meta" | cut -d= -f2-)
+                local tg=$(grep '^tag='       "$meta" | cut -d= -f2-)
+                printf "  [%d] %s  (timestamp=%s%s)\n" \
+                  "$i" "$name" "$ts" "${tg:+, tag=$tg}"
+            else
+                printf "  [%d] %s\n" "$i" "$name"
             fi
+            ((i++))
         done
-        [[ -n $to_pull ]] || die "pull: no artifacts found"
+
+        read -rp "Enter number [1-$((i-1))]: " sel
+        [[ $sel =~ ^[0-9]+$ ]] && (( sel>=1 && sel<i )) \
+          || die "Invalid selection"
+        to_pull="${files[$((sel-1))]}"
+
+    else
+        # non-interactive: version or latest
+        if [[ -n $version ]]; then
+            to_pull=$(ls "$dir"/*_"$version".tar.gz 2>/dev/null | head -n1)
+            [[ -n $to_pull ]] || die "pull: version $version not found"
+        else
+            local maxv=0
+            for f in "$dir"/*.tar.gz; do
+                [[ -e $f ]] || continue
+                if [[ $(basename "$f") =~ ^[0-9a-f]{32}_([0-9]+)\.tar\.gz$ ]]; then
+                    if (( BASH_REMATCH[1] > maxv )); then
+                        maxv=${BASH_REMATCH[1]}
+                        to_pull="$f"
+                    fi
+                fi
+            done
+            [[ -n $to_pull ]] || die "pull: no artifacts found"
+        fi
     fi
 
-    dest=$(basename "$to_pull")
+    # copy out
+    local dest=$(basename "$to_pull")
     if [[ -e $dest && $yes != "true" ]]; then
         read -rp "Overwrite '$dest'? [y/N] " ans
         [[ $ans =~ ^[Yy] ]] || { echo "Aborted."; return 1; }
     fi
-
-    [[ $verbose == "true" ]] && echo "Copying $to_pull to $dest"
+    $verbose && echo "Copying $to_pull → $dest"
     cp "$to_pull" "$dest"
 
     # verify checksum
     if [[ $dest =~ ^([0-9a-f]{32})_ ]]; then
-        exp=${BASH_REMATCH[1]}
-        act=$(md5_of_file "$dest")
+        local exp=${BASH_REMATCH[1]}
+        local act=$(md5_of_file "$dest")
         [[ $exp != $act ]] && echo "Warning: MD5 mismatch ($exp != $act)" >&2
     fi
 
     echo "$dest"
 }
+
 
 
 # ------------------------------------------------------------------
