@@ -20,10 +20,14 @@ show_help() {
     cat <<'EOF'
 pfrog - manage build artifacts across multiple boards using a shared NFS directory.
 
+STORE LOCATION:     (1) --nfs flag 
+                    (2) PFROG_ROOT env var (export PFROG_ROOT=<xxx>)
+                    (3) config file: ./pfrog.conf [PFROG_ROOT=<xxx>]
+
 Usage:
-  pfrog push [options] <board> <part> <dir>
-  pfrog pull [options] [<board> [<part> [<version>]]]
-  pfrog list [options] [<board> [<part>]]
+  pfrog push [options] <board> <part> <dir>             // --help
+  pfrog pull [options] [<board> [<part> [<version>]]]   // --help
+  pfrog list [options] [<board> [<part>]]               // --help
   pfrog --help
 
 Commands:
