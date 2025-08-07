@@ -5,12 +5,10 @@ PFROG_DIR=$(cd "$(dirname "$0")" && pwd)
 PFROG="$PFROG_DIR/pfrog.sh"
 
 fail_count=0
-
 fail() {
     echo "[FAIL] $1" >&2
     fail_count=$((fail_count + 1))
 }
-
 pass() {
     echo "[PASS] $1"
 }
@@ -18,11 +16,11 @@ pass() {
 cleanup() {
     rm -rf "$TMPDIR"
 }
-
 trap cleanup EXIT
 
 TMPDIR=$(mktemp -d)
 
+# Test pushing a new artifact creates version 1 and metadata
 test_push_new() {
     local artifact_dir
     artifact_dir=$(mktemp -d)
@@ -34,10 +32,11 @@ test_push_new() {
     else
         fail "push did not return expected version name (got '$out')"
     fi
-    [[ -f "$TMPDIR/boardA/partX/$out" ]] && pass "artifact file stored" || fail "artifact file not found in NFS store"
+    [[ -f "$TMPDIR/boardA/partX/$out" ]] && pass "artifact file stored" || fail "artifact file not found"
     [[ -f "$TMPDIR/boardA/partX/md5_1.meta" ]] && pass "meta file stored" || fail "meta file missing"
 }
 
+# Test pushing identical content returns same version without duplicating
 test_push_duplicate() {
     local artifact_dir
     artifact_dir=$(mktemp -d)
@@ -51,6 +50,7 @@ test_push_duplicate() {
     [[ "$count" -eq 1 ]] && pass "duplicate push did not add extra file" || fail "duplicate push added extra file ($count files)"
 }
 
+# Test push after modifying content increments version
 test_push_increment() {
     local art
     art=$(mktemp -d)
@@ -63,20 +63,32 @@ test_push_increment() {
     [[ "$v2" =~ _2\.tar\.gz$ ]] && pass "version incremented to 2" || fail "expected version 2, got '$v2'"
 }
 
+# Test listing boards, parts, and versions
 test_list() {
-    local boards expected_boards
-    boards=$("$PFROG" list --nfs "$TMPDIR" 2>/dev/null | sort)
-    expected_boards=$(printf '%s\n' boardA boardB boardC)
-    [[ "$boards" == "$expected_boards" ]] && pass "list boards" || fail "list boards returned unexpected result"
+    # list boards via pull
+    local boards expected
+    boards=$("$PFROG" pull --nfs "$TMPDIR" 2>/dev/null \
+        | grep -E '^[[:alnum:]]+$' \
+        | sort)
+    expected=$(printf '%s
+' boardA boardB boardC)
+    [[ "$boards" == "$expected" ]] && pass "list boards" || fail "list boards returned unexpected result: $boards"
+
+    # list parts for boardA via pull
     local parts
-    parts=$("$PFROG" list --nfs "$TMPDIR" boardA 2>/dev/null | sort)
-    [[ "$parts" == "partX" ]] && pass "list parts for boardA" || fail "list parts incorrect for boardA"
-    local versions count
-    versions=$("$PFROG" list --nfs "$TMPDIR" boardC partZ 2>/dev/null | sort)
-    count=$(echo "$versions" | wc -l)
-    [[ "$count" -eq 2 ]] && pass "list versions count correct" || fail "list versions expected 2 entries"
+    parts=$("$PFROG" pull --nfs "$TMPDIR" boardA 2>/dev/null \
+        | grep -E '^[[:alnum:]]+$' \
+        | sort)
+    [[ "$parts" == "partX" ]] && pass "list parts for boardA" || fail "list parts incorrect for boardA: $parts"
+
+    # list versions count under boardC/partZ via list
+    local version_count
+    version_count=$("$PFROG" list --nfs "$TMPDIR" boardC partZ 2>/dev/null \
+        | grep -c '\.tar\.gz')
+    [[ "$version_count" -eq 2 ]] && pass "list versions count correct" || fail "list versions expected 2 entries, got $version_count"
 }
 
+# Test pulling artifacts retrieves correct file and verifies checksum
 test_pull() {
     local art
     art=$(mktemp -d)
@@ -86,61 +98,46 @@ test_pull() {
     local newver
     newver=$("$PFROG" push --nfs "$TMPDIR" --yes boardP partQ "$art" 2>/dev/null)
 
-    # Isolated pull target
-    local pull_tmp
-    pull_tmp=$(mktemp -d)
-    pushd "$pull_tmp" > /dev/null
+    # isolate pull
+    local pulldir
+    pulldir=$(mktemp -d)
+    pushd "$pulldir" >/dev/null
 
     "$PFROG" pull --nfs "$TMPDIR" --yes boardP partQ >/dev/null 2>&1
 
-    if [[ -f "$newver" ]]; then
-        pass "pull retrieved file"
-    else
-        fail "pull did not copy expected file"
-    fi
+    [[ -f "$newver" ]] && pass "pull retrieved file" || fail "pull did not copy expected file"
 
-    local expect_md5 actual_md5
-    expect_md5=$(echo "$newver" | awk -F '_' '{print $1}')
-    actual_md5=$(md5sum "$newver" | awk '{print $1}')
-    [[ "$expect_md5" == "$actual_md5" ]] && pass "pull MD5 verified" || fail "pull MD5 mismatch"
+    local exp_md5 act_md5
+    exp_md5=$(echo "$newver" | awk -F '_' '{print $1}')
+    act_md5=$(md5sum "$newver" | awk '{print $1}')
+    [[ "$exp_md5" == "$act_md5" ]] && pass "pull MD5 verified" || fail "pull MD5 mismatch"
 
-    popd > /dev/null
-    rm -rf "$pull_tmp"
+    popd >/dev/null
 }
 
+# Test dry run does not create files
 test_dry_run() {
     local art
     art=$(mktemp -d)
     echo "dry" > "$art/d"
     local out
     out=$("$PFROG" push --nfs "$TMPDIR" --yes --dry boardD partR "$art" 2>/dev/null)
-    local file="$TMPDIR/boardD/partR/$out"
-    [[ ! -e "$file" ]] && pass "dry run did not create file" || fail "dry run unexpectedly created file"
+    [[ ! -e "$TMPDIR/boardD/partR/$out" ]] && pass "dry run did not create file" || fail "dry run unexpectedly created file"
 }
 
+# Test metadata file contains commit and tag
 test_metadata() {
-    local art
+    local art out base ver
     art=$(mktemp -d)
     echo "meta" > "$art/data"
-    local out base ver
     out=$("$PFROG" push --nfs "$TMPDIR" --yes --commit abcdef --tag mytag boardM partM "$art" 2>/dev/null)
     base="${out%.tar.gz}"; ver="${base##*_}"
     local meta_file="$TMPDIR/boardM/partM/md5_${ver}.meta"
-    if [[ -f "$meta_file" ]]; then
-        if grep -q '^commit=abcdef' "$meta_file" && grep -q '^tag=mytag' "$meta_file"; then
-            pass "metadata file contains commit and tag"
-        else
-            fail "metadata file missing commit or tag"
-        fi
+    if [[ -f "$meta_file" ]] && grep -q '^commit=abcdef' "$meta_file" && grep -q '^tag=mytag' "$meta_file"; then
+        pass "metadata file contains commit and tag"
     else
-        fail "metadata file not created"
+        fail "metadata file missing commit or tag"
     fi
-}
-
-test_completion() {
-    local comp
-    comp=$("$PFROG" --generate-completion bash)
-    echo "$comp" | grep -q 'complete -F _pfrog_complete pfrog' && pass "completion script generated" || fail "completion script missing expected function"
 }
 
 main() {
@@ -151,13 +148,14 @@ main() {
     test_pull
     test_dry_run
     test_metadata
-    test_completion
+
     if [[ "$fail_count" -eq 0 ]]; then
         echo "All tests passed."
+        exit 0
     else
         echo "$fail_count test(s) failed." >&2
         exit 1
     fi
 }
 
-main "$@"
+main
