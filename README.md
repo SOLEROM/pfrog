@@ -17,6 +17,8 @@ export PFROG_ROOT=./testFOLDER/nfsFOLDER
 ./pfrog.sh list
 ./pfrog.sh list boardA
 ./pfrog.sh push boardA rootfs testFOLDER/wrkFOLDER/AAA
+./pfrog.sh pull 
+./pfrog.sh pull boardA
 ./pfrog.sh pull boardA rootfs
 
 ```
