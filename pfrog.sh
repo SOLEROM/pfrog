@@ -203,11 +203,11 @@ EOF
 # ------------------------------------------------------------------
 # PULL COMMAND (with interactive listing)
 # ------------------------------------------------------------------
-
 pull_cmd() {
     # option defaults
     local nfs_flag="" config_file="pfrog.conf"
     local yes="false" verbose="false" tag_mode="false"
+    local extract_root=""
 
     # collect positional args here
     local args=()
@@ -218,6 +218,8 @@ pull_cmd() {
             --yes)     yes="true"; shift;;
             --verbose) verbose="true"; shift;;
             --tag)     tag_mode="true"; shift;;
+            --root)    extract_root="$2"; shift 2;;
+            root=*)    extract_root="${1#root=}"; shift;;
             -h|--help)
                 cat <<'EOF'
 Usage: pfrog pull [options] [<board> [<part> [<version>]]]
@@ -230,20 +232,18 @@ Usage: pfrog pull [options] [<board> [<part> [<version>]]]
 Options:
   --nfs <path>       Override NFS root.
   --config <file>    Alternate config file.
-  --yes              Skip overwrite prompt.
+  --yes              Skip overwrite prompt (when saving tar to cwd).
   --verbose          Detailed logs.
   --tag              Interactive version selection.
+  --root <path>      OR root=<path>; extract tar into <path> with: tar -xzf ... -C <path>
   -h, --help         Show this help.
 EOF
                 return
                 ;;
-            *) 
-                args+=("$1")
-                shift
-                ;;
+            *)
+                args+=("$1"); shift;;
         esac
     done
-    # restore positional args
     set -- "${args[@]}"
 
     # resolve NFS root
@@ -282,7 +282,6 @@ EOF
 
     local to_pull=""
     if [[ "$tag_mode" == "true" ]]; then
-        # interactive list + select
         echo "Select an artifact to pull from '$board/$part':"
         local files=( "$dir"/*.tar.gz )
         [[ ${#files[@]} -gt 0 ]] || die "pull: no artifacts found"
@@ -307,9 +306,7 @@ EOF
         [[ $sel =~ ^[0-9]+$ ]] && (( sel>=1 && sel<i )) \
           || die "Invalid selection"
         to_pull="${files[$((sel-1))]}"
-
     else
-        # non-interactive: version or latest
         if [[ -n $version ]]; then
             to_pull=$(ls "$dir"/*_"$version".tar.gz 2>/dev/null | head -n1)
             [[ -n $to_pull ]] || die "pull: version $version not found"
@@ -328,23 +325,32 @@ EOF
         fi
     fi
 
-    # copy out
-    local dest=$(basename "$to_pull")
-    if [[ -e $dest && $yes != "true" ]]; then
-        read -rp "Overwrite '$dest'? [y/N] " ans
-        [[ $ans =~ ^[Yy] ]] || { echo "Aborted."; return 1; }
-    fi
-    $verbose && echo "Copying $to_pull → $dest"
-    cp "$to_pull" "$dest"
-
-    # verify checksum
-    if [[ $dest =~ ^([0-9a-f]{32})_ ]]; then
+    # verify checksum before extracting/copying
+    if [[ $(basename "$to_pull") =~ ^([0-9a-f]{32})_ ]]; then
         local exp=${BASH_REMATCH[1]}
-        local act=$(md5_of_file "$dest")
+        local act
+        act=$(md5_of_file "$to_pull")
         [[ $exp != $act ]] && echo "Warning: MD5 mismatch ($exp != $act)" >&2
     fi
 
-    echo "$dest"
+    if [[ -n "$extract_root" ]]; then
+        # extract directly from NFS store, no local tar left behind
+        $verbose && echo "Extracting $to_pull -> $extract_root"
+        mkdir -p "$extract_root"
+        tar -xzf "$to_pull" -C "$extract_root"
+        echo "Extracted to $extract_root"
+        printf '%s\n' "$extract_root"
+    else
+        # copy tar to cwd (original behavior)
+        local dest=$(basename "$to_pull")
+        if [[ -e $dest && $yes != "true" ]]; then
+            read -rp "Overwrite '$dest'? [y/N] " ans
+            [[ $ans =~ ^[Yy] ]] || { echo "Aborted."; return 1; }
+        fi
+        $verbose && echo "Copying $to_pull → $dest"
+        cp "$to_pull" "$dest"
+        echo "$dest"
+    fi
 }
 
 

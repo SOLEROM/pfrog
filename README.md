@@ -24,6 +24,7 @@ export PFROG_ROOT=./testFOLDER/nfsFOLDER
 ./pfrog.sh pull boardA
 ./pfrog.sh pull boardA rootfs
 ./pfrog.sh pull boardA rootfs --tag
+./pfrog.sh pull boardA rootfs root=/tmp/c
 
 ./pfrog.sh list --help
 ./pfrog.sh push --help
