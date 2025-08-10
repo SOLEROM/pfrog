@@ -224,12 +224,13 @@ pull_cmd() {
             root=*)    extract_root="${1#root=}"; shift;;
             -h|--help)
                 cat <<'EOF'
-Usage: pfrog pull [options] [<board> [<part> [<version>]]]
+Usage: pfrog pull [options] [<board> [<part> [<version>|<hash>]]]
 
-  No args                → list boards
-  <board>                → list parts under that board
-  <board> <part>         → pull latest (or use --tag for interactive)
-  <board> <part> <ver>   → pull specific version
+  No args                     → list boards
+  <board>                     → list parts under that board
+  <board> <part>              → pull latest (or use --tag for interactive)
+  <board> <part> <version>    → pull specific version number
+  <board> <part> <hash>       → pull by MD5 (32 hex) prefix in filename
 
 Options:
   --nfs <path>       Override NFS root.
@@ -242,8 +243,7 @@ Options:
 EOF
                 return
                 ;;
-            *)
-                args+=("$1"); shift;;
+            *) args+=("$1"); shift;;
         esac
     done
     set -- "${args[@]}"
@@ -278,7 +278,7 @@ EOF
     fi
 
     # 3) two or three args → perform pull
-    local board="$1" part="$2" version="${3:-}"
+    local board="$1" part="$2" selector="${3:-}"
     local dir="$nfs_root/$board/$part"
     [[ -d $dir ]] || die "pull: '$board/$part' not found"
 
@@ -290,14 +290,15 @@ EOF
 
         local i=1
         for f in "${files[@]}"; do
-            local name=$(basename "$f")
+            local name; name=$(basename "$f")
             local ver=${name#*_}; ver=${ver%.tar.gz}
             local meta="$dir/md5_${ver}.meta"
             if [[ -f $meta ]]; then
-                local ts=$(grep '^timestamp=' "$meta" | cut -d= -f2-)
-                local tg=$(grep '^tag='       "$meta" | cut -d= -f2-)
+                local ts tg
+                ts=$(grep '^timestamp=' "$meta" | cut -d= -f2-)
+                tg=$(grep '^tag='       "$meta" | cut -d= -f2-)
                 printf "  [%d] %s  (timestamp=%s%s)\n" \
-                  "$i" "$name" "$ts" "${tg:+, tag=$tg}"
+                    "$i" "$name" "$ts" "${tg:+, tag=$tg}"
             else
                 printf "  [%d] %s\n" "$i" "$name"
             fi
@@ -306,17 +307,41 @@ EOF
 
         read -rp "Enter number [1-$((i-1))]: " sel
         [[ $sel =~ ^[0-9]+$ ]] && (( sel>=1 && sel<i )) \
-          || die "Invalid selection"
+            || die "Invalid selection"
         to_pull="${files[$((sel-1))]}"
     else
-        if [[ -n $version ]]; then
-            to_pull=$(ls "$dir"/*_"$version".tar.gz 2>/dev/null | head -n1)
-            [[ -n $to_pull ]] || die "pull: version $version not found"
+        # Non-interactive selection: latest | version | hash
+        if [[ -n $selector ]]; then
+            # Accept numeric version OR 32-hex MD5 (case-insensitive)
+            local nocase_was_set=0
+            if [[ $- != *i* ]]; then :; fi  # silence shellcheck about $-
+            if ! shopt -q nocasematch; then
+                shopt -s nocasematch
+                nocase_was_set=1
+            fi
+
+            if [[ $selector =~ ^[0-9]+$ ]]; then
+                # specific version
+                to_pull=$(ls -1 "$dir"/*_"$selector".tar.gz 2>/dev/null | head -n1)
+                [[ -n $to_pull ]] || die "pull: version $selector not found in '$board/$part'"
+            elif [[ $selector =~ ^[0-9a-f]{32}$ ]]; then
+                # specific hash
+                # filename format: <md5>_<n>.tar.gz
+                to_pull=$(ls -1 "$dir"/"${selector}"_*.tar.gz 2>/dev/null | head -n1)
+                [[ -n $to_pull ]] || die "pull: hash $selector not found in '$board/$part'"
+            else
+                [[ $nocase_was_set -eq 0 ]] || shopt -u nocasematch
+                die "pull: invalid selector '$selector' (use version number or 32-hex MD5)"
+            fi
+
+            [[ $nocase_was_set -eq 0 ]] || shopt -u nocasematch
         else
+            # latest by highest _<version> suffix
             local maxv=0
             for f in "$dir"/*.tar.gz; do
                 [[ -e $f ]] || continue
-                if [[ $(basename "$f") =~ ^[0-9a-f]{32}_([0-9]+)\.tar\.gz$ ]]; then
+                local base; base=$(basename "$f")
+                if [[ $base =~ ^[0-9a-f]{32}_([0-9]+)\.tar\.gz$ ]]; then
                     if (( BASH_REMATCH[1] > maxv )); then
                         maxv=${BASH_REMATCH[1]}
                         to_pull="$f"
@@ -344,7 +369,7 @@ EOF
         printf '%s\n' "$extract_root"
     else
         # copy tar to cwd (original behavior)
-        local dest=$(basename "$to_pull")
+        local dest; dest=$(basename "$to_pull")
         if [[ -e $dest && $yes != "true" ]]; then
             read -rp "Overwrite '$dest'? [y/N] " ans
             [[ $ans =~ ^[Yy] ]] || { echo "Aborted."; return 1; }

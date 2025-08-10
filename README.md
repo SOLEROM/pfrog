@@ -26,8 +26,12 @@ export PFROG_ROOT=./testFOLDER/nfsFOLDER
 ./pfrog.sh pull boardA rootfs
 ./pfrog.sh pull boardA rootfs --tag
 ./pfrog.sh pull boardA rootfs root=/tmp/c
+
 ./pfrog.sh pull boardA rootfs 2 
 ./pfrog.sh pull boardA rootfs 2 root=/tmp/d
+
+./pfrog.sh pull boardA rootfs 1f93cf3ce72efd9a970f2e39944afcde          
+./pfrog.sh pull boardA rootfs 1f93cf3ce72efd9a970f2e39944afcde  root=/tmp/d
 
 ./pfrog.sh compare boardA rootfs root=/tmp/c
 ./pfrog.sh compare boardA rootfs root=/tmp/c --tag
