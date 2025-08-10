@@ -28,12 +28,14 @@ Usage:
   pfrog push [options] <board> <part> <dir>             // --help
   pfrog pull [options] [<board> [<part> [<version>]]]   // --help
   pfrog list [options] [<board> [<part>]]               // --help
+  pfrog compare [options] <board> <part> [<version>]      // --help
   pfrog --help
 
 Commands:
   push     Push an artifact (directory) into the store.
   pull     Interactive pull/list or retrieve an artifact.
   list     List contents of the store (tree view).
+  compare --root dir mtime with artifact mtime (supports --tag).
 
 Global Options:
   --help, -h           Show this help message.
@@ -425,6 +427,189 @@ EOF
     done
 }
 
+
+# ------------------------------------------------------------------
+# compare COMMAND
+# ------------------------------------------------------------------
+compare_cmd() {
+    # Compare a source dir (root=<path>) against an artifact in the pfrog store.
+    # Exit codes/messages match the reference script:
+    #   src>art  -> echo "... ; return 1" ; exit 1
+    #   art>src  -> echo "... ; return 2" ; exit 2
+    #   equal    -> echo "... ; return 0" ; exit 0
+
+    local nfs_flag="" config_file="pfrog.conf" verbose="false" tag_mode="false"
+    local root="" board="" part="" version=""
+
+    # Parse flags, key=value, and positionals
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --nfs)     nfs_flag="$2"; shift 2;;
+            --config)  config_file="$2"; shift 2;;
+            --verbose) verbose="true"; shift;;
+            --tag)     tag_mode="true"; shift;;
+            -h|--help)
+                cat <<'EOF'
+Usage: pfrog compare [options] [<board> [<part> [<version>]]]
+
+Compares the mtime of a source directory (given by root=<path>) with an
+artifact (<md5>_<version>.tar.gz) in the pfrog store under <board>/<part>.
+
+Behavior (exit codes):
+  source is newer   -> update artifact ; return 1
+  artifact is newer -> update source   ; return 2
+  same timestamp    -> up-to-date      ; return 0
+
+Options:
+  root=<path>         Source directory to compare (REQUIRED when <board> and <part> are provided)
+  --nfs <path>        Override NFS root (else PFROG_ROOT, else ./pfrog.conf)
+  --config <file>     Alternate config file (default: ./pfrog.conf)
+  --tag               Interactive version chooser (shows meta timestamp & tag)
+  --verbose           Extra logging
+  -h, --help          Show this help
+
+Examples:
+  pfrog compare root=/work/build/out boardA rootfs
+  pfrog compare root=. --tag boardA rootfs
+  pfrog compare root=/src boardA rootfs 12
+EOF
+                return 0
+                ;;
+            root=*)
+                root="${1#root=}"
+                shift
+                ;;
+            --) shift; break;;
+            -*) echo "pfrog: unknown option to compare: $1" >&2; return 2;;
+            *)  args+=("$1"); shift;;
+        esac
+    done
+    set -- "${args[@]}" "$@"
+
+    # Positionals (like list/pull flow)
+    board="${1:-}"
+    part="${2:-}"
+    version="${3:-}"
+
+    # Resolve NFS root (needed even for helper listings)
+    local nfs_root=""
+    if [[ -n "$nfs_flag" ]]; then
+        nfs_root="$nfs_flag"
+    elif [[ -n "${PFROG_ROOT:-}" ]]; then
+        nfs_root="$PFROG_ROOT"
+    elif [[ -f "$config_file" ]]; then
+        # shellcheck disable=SC1090
+        source "$config_file"
+        if [[ -z "${PFROG_ROOT:-}" ]]; then
+            echo "pfrog: $config_file does not define PFROG_ROOT" >&2; return 2
+        fi
+        nfs_root="$PFROG_ROOT"
+    else
+        echo "pfrog: cannot resolve NFS root (use --nfs or PFROG_ROOT or ./pfrog.conf)" >&2
+        return 2
+    fi
+    [[ -d "$nfs_root" ]] || { echo "pfrog: NFS root does not exist: $nfs_root" >&2; return 2; }
+    [[ "$verbose" == "true" ]] && echo "pfrog: NFS root = $nfs_root" >&2
+
+    # Helper flow (exactly like your pull snippets)
+    if [[ $# -eq 0 ]]; then
+        echo "You need to choose a board:"
+        for d in "$nfs_root"/*/; do
+            [[ -d $d ]] || continue
+            printf "  %s/\n" "${d%/}" | xargs basename
+        done
+        return 0
+    fi
+
+    if [[ $# -eq 1 ]]; then
+        local board_dir="$nfs_root/$board"
+        [[ -d "$board_dir" ]] || { echo "pull: board '$board' not found" >&2; return 2; }
+        echo "You need to choose a part under board '$board':"
+        for d in "$board_dir"/*/; do
+            [[ -d $d ]] || continue
+            printf "  %s/\n" "${d%/}" | xargs basename
+        done
+        return 0
+    fi
+
+    # From here, both board and part are provided; root= is required now
+    [[ -n "$root" ]] || { echo "pfrog: compare requires root=<path> when board/part are provided" >&2; return 2; }
+    [[ -d "$root" ]] || { echo "pfrog: not a directory: $root" >&2; return 5; }
+
+    local base="$nfs_root/$board/$part"
+    [[ -d "$base" ]] || { echo "pfrog: no such path in store: $board/$part" >&2; return 6; }
+
+    # Choose version
+    local chosen_ver="" art_path=""
+    if [[ -n "$version" && "$tag_mode" != "true" ]]; then
+        chosen_ver="$version"
+    elif [[ "$tag_mode" == "true" ]]; then
+        echo "Available artifacts for $board/$part:" >&2
+        local rows=()
+        while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            local bn; bn=$(basename "$f")
+            local ver="${bn##*_}"; ver="${ver%.tar.gz}"
+            [[ "$ver" =~ ^[0-9]+$ ]] || continue
+            local meta="$base/md5_${ver}.meta"
+            local ts=""; local tag=""
+            if [[ -f "$meta" ]]; then
+                ts=$(grep -E '^timestamp=' "$meta" 2>/dev/null | head -n1 | cut -d= -f2- || true)
+                tag=$(grep -E '^tag='        "$meta" 2>/dev/null | head -n1 | cut -d= -f2- || true)
+            fi
+            rows+=("$ver|${ts:-}|${tag:-}|$bn")
+        done < <(ls -1 "$base"/*_*.tar.gz 2>/dev/null | sort -V)
+
+        if [[ ${#rows[@]} -eq 0 ]]; then
+            echo "pfrog: no artifacts found for $board/$part" >&2; return 6
+        fi
+
+        printf "%-6s  %-19s  %-20s  %s\n" "VER" "TIMESTAMP" "TAG" "FILE" >&2
+        for r in "${rows[@]}"; do
+            IFS='|' read -r v t g b <<<"$r"
+            printf "%-6s  %-19s  %-20s  %s\n" "$v" "${t:-"-"}" "${g:-"-"}" "$b" >&2
+        done
+
+        read -r -p "Select version (VER): " chosen_ver
+        [[ "$chosen_ver" =~ ^[0-9]+$ ]] || { echo "pfrog: invalid version selected" >&2; return 2; }
+    else
+        local latest=""
+        latest=$(ls -1 "$base"/*_*.tar.gz 2>/dev/null | sed -E 's/.*_([0-9]+)\.tar\.gz/\1/' | sort -n | tail -1 || true)
+        [[ -n "$latest" ]] || { echo "pfrog: no artifacts found for $board/$part" >&2; return 6; }
+        chosen_ver="$latest"
+    fi
+
+    # Resolve the artifact file path for chosen version
+    local match=""
+    match=$(ls -1 "$base"/*_"$chosen_ver".tar.gz 2>/dev/null | head -n1 || true)
+    [[ -n "$match" && -f "$match" ]] || { echo "pfrog: version $chosen_ver not found for $board/$part" >&2; return 6; }
+    art_path="$match"
+
+    [[ "$verbose" == "true" ]] && {
+        echo "pfrog: comparing source root='$root' vs artifact='$art_path'" >&2
+    }
+
+    # Compare mtimes (GNU coreutils)
+    local src_mtime art_mtime
+    src_mtime=$(stat -c %Y "$root")
+    art_mtime=$(stat -c %Y "$art_path")
+
+    if (( src_mtime > art_mtime )); then
+        echo "source is newer -> update artifact ; return 1"
+        return 1
+    elif (( art_mtime > src_mtime )); then
+        echo "artifact is newer -> update source ; return 2"
+        return 2
+    else
+        echo "source is up-to-date with artifact ; return 0"
+        return 0
+    fi
+}
+
+
+
+
 # ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
@@ -435,6 +620,7 @@ main() {
         push) shift; push_cmd "$@";;
         pull) shift; pull_cmd "$@";;
         list) shift; list_cmd "$@";;
+        compare) shift;compare_cmd "$@" ;;
         -h|--help) show_help;;
         *) die "unknown command: $1";;
     esac
