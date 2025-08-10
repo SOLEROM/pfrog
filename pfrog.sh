@@ -178,17 +178,24 @@ EOF
     fi
 
     mv "$tmpfile" "$dest"
-    [[ "$verbose" == "true" ]] && echo "Stored: $dest"
+    
+    # match timestamp to source folder mtime
+    local src_mtime
+    src_mtime=$(date -r "$srcdir" +%s)
+    touch -d "@$src_mtime" "$dest"
+
+    [[ "$verbose" == "true" ]] && echo "Stored: $dest (timestamp set to match source dir)"
 
     # write metadata
     local meta="$target_dir/md5_${newv}.meta"
     {
-        printf 'timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'timestamp=%s\n' "$(date -u -d "@$src_mtime" +%Y-%m-%dT%H:%M:%SZ)"
         printf 'user=%s\n' "${USER:-unknown}"
         [[ -n $commit ]] && printf 'commit=%s\n' "$commit"
         [[ -n $tag    ]] && printf 'tag=%s\n'    "$tag"
     } > "$meta"
-    [[ "$verbose" == "true" ]] && echo "Meta: $meta"
+    touch -d "@$src_mtime" "$meta"
+    [[ "$verbose" == "true" ]] && echo "Meta: $meta (timestamp matched)"
 
     echo "$name"
 }
